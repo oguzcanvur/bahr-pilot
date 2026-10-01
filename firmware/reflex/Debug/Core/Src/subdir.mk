@@ -14,7 +14,11 @@ C_SRCS += \
 ../Core/Src/esc.c \
 ../Core/Src/sbus.c \
 ../Core/Src/pi_link.c \
-../Core/Src/failsafe.c
+../Core/Src/failsafe.c \
+../Core/Src/battery.c \
+../Core/Src/imu.c \
+../Core/Src/settings.c \
+../Core/Src/wdg.c
 
 OBJS += \
 ./Core/Src/main.o \
@@ -26,7 +30,11 @@ OBJS += \
 ./Core/Src/esc.o \
 ./Core/Src/sbus.o \
 ./Core/Src/pi_link.o \
-./Core/Src/failsafe.o
+./Core/Src/failsafe.o \
+./Core/Src/battery.o \
+./Core/Src/imu.o \
+./Core/Src/settings.o \
+./Core/Src/wdg.o
 
 C_DEPS += \
 ./Core/Src/main.d \
@@ -38,7 +46,11 @@ C_DEPS += \
 ./Core/Src/esc.d \
 ./Core/Src/sbus.d \
 ./Core/Src/pi_link.d \
-./Core/Src/failsafe.d
+./Core/Src/failsafe.d \
+./Core/Src/battery.d \
+./Core/Src/imu.d \
+./Core/Src/settings.d \
+./Core/Src/wdg.d
 
 
 # Each subdirectory must supply rules for building sources it contributes

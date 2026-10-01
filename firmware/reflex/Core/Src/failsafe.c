@@ -2,6 +2,8 @@
 #include "esc.h"
 #include "sbus.h"
 #include "pi_link.h"
+#include "battery.h"
+#include "imu.h"
 
 /* A two-position switch reads roughly CH_MIN or CH_MAX; treat anything
  * past the midpoint as "on". SBUS_GetChannel() defaults to SBUS_CH_MID
@@ -85,6 +87,10 @@ void Failsafe_Update(void)
     uint32_t now = HAL_GetTick();
     if ((now - s_lastTelemetryTick) >= RC_LINK_TELEMETRY_PERIOD_MS) {
         s_lastTelemetryTick = now;
-        PiLink_SendTelemetry(armed, rcLinkUp, overrideOn);
+        int16_t rollCdeg = (int16_t)(IMU_GetRollDeg() * 100.0f);
+        int16_t pitchCdeg = (int16_t)(IMU_GetPitchDeg() * 100.0f);
+        PiLink_SendTelemetry(armed, rcLinkUp, overrideOn,
+                              Battery_IsValid(), Battery_GetMilliVolts(),
+                              IMU_IsValid(), rollCdeg, pitchCdeg);
     }
 }

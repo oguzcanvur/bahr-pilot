@@ -25,6 +25,10 @@
 #include "sbus.h"
 #include "pi_link.h"
 #include "failsafe.h"
+#include "battery.h"
+#include "imu.h"
+#include "settings.h"
+#include "wdg.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -57,6 +61,8 @@ UART_HandleTypeDef huart3;
 /* USER CODE BEGIN PV */
 static uint32_t s_lastControlTick;
 static uint32_t s_lastBlinkTick;
+static uint32_t s_lastBatteryTick;
+static uint32_t s_lastImuTick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -111,10 +117,16 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  Settings_Init();
   ESC_Init();
   SBUS_Init();
-  PiLink_Init();
+  Battery_Init();
+  IMU_Init();
+  PiLink_Init(); /* after Settings_Init: loads the persisted RC map, see pi_link.c */
   Failsafe_Init();
+  Wdg_Init(); /* enabled last: nothing above should ever block long enough
+                * to need feeding, but starting the watchdog before the
+                * main loop exists means any lockup from here on is caught */
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -146,11 +158,25 @@ int main(void)
       Failsafe_Update();
     }
 
+    if ((now - s_lastBatteryTick) >= 50U)
+    {
+      s_lastBatteryTick = now;
+      Battery_Update();
+    }
+
+    if ((now - s_lastImuTick) >= 20U)
+    {
+      s_lastImuTick = now;
+      IMU_Update();
+    }
+
     if ((now - s_lastBlinkTick) >= 500U)
     {
       s_lastBlinkTick = now;
       BSP_LED_Toggle(LED_GREEN);
     }
+
+    Wdg_Refresh();
 
     /* USER CODE END WHILE */
 

@@ -16,9 +16,14 @@ units BAHR-GCS's RCn_MIN/MAX/TRIM parameters already use). flags bit0 =
 throttle reversed, bit1 = steering reversed. Sent once whenever the mapping
 changes, not periodically.
 
-Nucleo -> Pi, RC telemetry, 36 bytes: [0xE5][0x5E][16 x channel uint16]
-[status][XOR checksum]. status bit0=armed, bit1=rc_link_up,
-bit2=override_active, bit3=pi_link_fresh.
+Nucleo -> Pi, RC telemetry, 42 bytes (extended 2026-10-01 from the original
+36 to add battery/IMU): [0xE5][0x5E][16 x channel uint16][status]
+[battery_mv uint16][roll_cdeg int16][pitch_cdeg int16][XOR checksum].
+status bit0=armed, bit1=rc_link_up, bit2=override_active,
+bit3=pi_link_fresh, bit4=battery_valid, bit5=imu_valid. battery_mv/
+roll_cdeg/pitch_cdeg are only meaningful when their validity bit is set —
+see bahr_pilot/firmware/reflex/Core/Src/battery.c and imu.c for where
+these actually come from (and their own hardware-unverified caveats).
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ PULSE_MAX_US = 2000
 _MOTOR_SYNC = bytes([0xA5, 0x5A])
 _CONFIG_SYNC = bytes([0xC5, 0x5C])
 _TELEMETRY_SYNC = bytes([0xE5, 0x5E])
-_TELEMETRY_FRAME_LEN = 36
+_TELEMETRY_FRAME_LEN = 42
 _NUM_CHANNELS = 16
 
 
@@ -57,6 +62,11 @@ class RcTelemetry:
         self.rc_link_up = False
         self.override_active = False
         self.pi_link_fresh = False
+        self.battery_valid = False
+        self.battery_mv = 0
+        self.imu_valid = False
+        self.roll_deg = 0.0
+        self.pitch_deg = 0.0
         self.last_update: float = 0.0
 
 
@@ -130,10 +140,16 @@ class NucleoLink:
             return
         channels = list(struct.unpack(">16H", frame[2:34]))
         status = frame[34]
+        battery_mv, roll_cdeg, pitch_cdeg = struct.unpack(">Hhh", frame[35:41])
         t = self.telemetry
         t.channels = channels
         t.armed = bool(status & 0x01)
         t.rc_link_up = bool(status & 0x02)
         t.override_active = bool(status & 0x04)
         t.pi_link_fresh = bool(status & 0x08)
+        t.battery_valid = bool(status & 0x10)
+        t.imu_valid = bool(status & 0x20)
+        t.battery_mv = battery_mv
+        t.roll_deg = roll_cdeg / 100.0
+        t.pitch_deg = pitch_cdeg / 100.0
         t.last_update = time.time()

@@ -15,19 +15,29 @@ project — see that folder's own notes for building/flashing it).
         --echomap-port /dev/serial/by-id/usb-...-echomap
 
 Known gaps (2026-10-01, see ROADMAP.md section 4):
-  - BNO086 isn't read yet (bahr_pilot/firmware/reflex doesn't have that
-    driver either), so ATTITUDE's roll/pitch are always 0 — only yaw (from
-    GNSS heading) is real.
-  - pi_link's RC telemetry frame (added 2026-10-01) reports raw channels
-    and status, but still nothing about battery voltage or IMU — SYS_STATUS
-    battery fields are always "unknown".
+  - BNO086 is now read (firmware/reflex/Core/Src/imu.c, SHTP/I2C, Game
+    Rotation Vector report) and ATTITUDE's roll/pitch come from it when
+    pi_link reports imu_valid — but that driver has never run against a
+    real BNO086 (no hardware this session), and the axis convention
+    relative to how it ends up physically mounted is unverified. Yaw is
+    still always GNSS heading, by design (no magnetometer fusion).
+  - pi_link's RC telemetry frame now also carries battery voltage
+    (battery.c, ADC1) — SYS_STATUS reports a real voltage_battery when the
+    Nucleo says it's valid — but battery.c's ADC divider ratio is an
+    unmeasured placeholder, so treat the number as "roughly plausible",
+    not calibrated, until checked against a multimeter.
   - Mission/parameter protocol is implemented but not yet exercised against
     a real mission upload from BAHR-GCS.
   - RC channel -> function mapping (RCMAP_ROLL/RCMAP_THROTTLE/RCMAP_ARM/
     RCMAP_OVERRIDE, RC1..8_MIN/MAX/TRIM/REVERSED) is forwarded to the
     Nucleo and drives real mixing there, using BAHR-GCS's existing
     parameter page and RadioPage calibration screen — but not yet verified
-    against a real transmitter end-to-end (no hardware this session).
+    against a real transmitter end-to-end (no hardware this session). Now
+    persisted to the Nucleo's flash (settings.c), survives power-cycle.
+  - Low-battery failsafe (BATT_LOW_VOLT/BATT_FS_ENABLE params) stops the
+    motors the same way a stale GCS link does, and defaults to OFF for
+    exactly that reason — untested beyond unit-level param plumbing, for
+    the same "no real battery/ADC" reason as the voltage reading itself.
 """
 from __future__ import annotations
 
@@ -38,6 +48,7 @@ import time
 
 from pymavlink import mavutil
 
+from bahr_pilot.datalog import DataLogger
 from bahr_pilot.modes import MODE_AUTO, MODE_GUIDED, MODE_HOLD, MODE_MANUAL, MODE_NAMES, MODE_RTL
 from bahr_pilot.navigation import Navigator, bearing_deg, distance_m
 from bahr_pilot.nucleo_link import NucleoLink, PULSE_MAX_US, PULSE_MIN_US, PULSE_NEUTRAL_US
@@ -48,6 +59,9 @@ from bahr_pilot.state import VehicleState
 TICK_HZ = 20.0
 TELEMETRY_HZ = 5.0
 GCS_LINK_TIMEOUT_S = 3.0
+# How long the pack voltage must stay under threshold before the failsafe
+# trips — a brief sag under load (e.g. a hard turn) shouldn't stop the boat.
+BATT_FS_DEBOUNCE_S = 3.0
 
 # Mirrors bahr_pilot/firmware/reflex/Core/Inc/sbus.h's SBUS_CH_MIN/MID/MAX — the
 # default RCn_MIN/MAX/TRIM below assume no calibration offset, until
@@ -73,6 +87,21 @@ DEFAULT_PARAMS: dict[str, float] = {
     "RCMAP_THROTTLE": 3.0,
     "RCMAP_ARM": 6.0,
     "RCMAP_OVERRIDE": 5.0,
+    # Low-battery failsafe. BATT_LOW_VOLT is the same real ArduPilot
+    # parameter already in gcs/param_meta.py's "battery" group (absolute
+    # pack voltage, not per-cell — its own description already says to
+    # calculate ~3.5V/cell into one absolute number), reused as-is rather
+    # than inventing a parallel name. BATT_FS_ENABLE is new, bahr_pilot-
+    # only, deliberately a plain on/off (unlike real ArduPilot's
+    # BATT_FS_LOW_ACT multi-action enum — this vehicle only ever does one
+    # thing on low battery: stop, same as every other failsafe here) —
+    # see gcs/param_meta.py for its description. Defaults to OFF: the
+    # Nucleo's ADC divider ratio (battery.c) is an unmeasured placeholder,
+    # so tripping this by default on an uncalibrated reading would be
+    # worse than not having it — turn it on only after checking the
+    # reported voltage against a multimeter.
+    "BATT_LOW_VOLT": 10.5,
+    "BATT_FS_ENABLE": 0.0,
 }
 for _ch in range(1, 9):
     DEFAULT_PARAMS[f"RC{_ch}_MIN"] = _SBUS_CH_MIN
@@ -112,6 +141,14 @@ class Vehicle:
         self._speed_mps = 0.0
 
         self._motor_test: tuple[int, int, float] | None = None  # motor, pulse_us, end_t
+
+        self._batt_low_since: float | None = None
+        self._batt_fs_warned = False
+
+        self.data_logger: DataLogger | None = None
+        if args.log_dir:
+            self.data_logger = DataLogger(args.log_dir)
+            self.log(f"logging raw sensor data to {self.data_logger.path}")
 
         self._boot_t = time.time()
         self._last_telemetry = 0.0
@@ -398,6 +435,47 @@ class Vehicle:
         if self.rtcm is not None:
             self.rtcm.handle_fragment(msg.flags, msg.len, bytes(msg.data))
 
+    # -- battery -----------------------------------------------------------
+
+    def _battery_status(self) -> tuple[int, int]:
+        """(voltage_mv, battery_remaining_pct) for sys_status_send — MAVLink
+        'unknown' sentinels (65535 / -1) unless the Nucleo has a fresh,
+        valid battery reading. battery_remaining is always -1 (unknown):
+        estimating a percentage needs a known pack capacity/cell count
+        (BATT_CAPACITY in gcs/param_meta.py's real ArduPilot sense), which
+        this vehicle doesn't track — only the raw voltage is real here."""
+        if self.nucleo is None or not self.nucleo.telemetry.battery_valid:
+            return 65535, -1
+        return self.nucleo.telemetry.battery_mv, -1
+
+    def _battery_failsafe_active(self) -> bool:
+        """Debounced low-voltage cutoff (BATT_FS_ENABLE/BATT_LOW_VOLT
+        params) — mirrors the GCS-link-timeout failsafe's own 'default to
+        stop' philosophy. Silently does nothing if there's no Nucleo or no
+        valid battery reading yet, same as the rest of this project treats
+        an absent sensor as 'can't fail safe on data we don't have', not
+        as an error."""
+        if self.params["BATT_FS_ENABLE"] <= 0.5:
+            return False
+        if self.nucleo is None or not self.nucleo.telemetry.battery_valid:
+            return False
+        threshold_mv = self.params["BATT_LOW_VOLT"] * 1000.0
+        if self.nucleo.telemetry.battery_mv >= threshold_mv:
+            self._batt_low_since = None
+            self._batt_fs_warned = False
+            return False
+
+        now = time.time()
+        if self._batt_low_since is None:
+            self._batt_low_since = now
+        if (now - self._batt_low_since) < BATT_FS_DEBOUNCE_S:
+            return False
+        if not self._batt_fs_warned:
+            volts = self.nucleo.telemetry.battery_mv / 1000.0
+            self._statustext(f"Battery low: {volts:.1f}V, motors stopped", severity=2)
+            self._batt_fs_warned = True
+        return True
+
     # -- motor command + telemetry ---------------------------------------
 
     def _motor_command(self) -> tuple[int, int]:
@@ -408,7 +486,7 @@ class Vehicle:
             self._motor_test = None
 
         gcs_stale = (time.time() - self.state.gcs_last_seen) > self.params["GCS_FS_TIMEOUT_S"]
-        if not self.state.armed or gcs_stale:
+        if not self.state.armed or gcs_stale or self._battery_failsafe_active():
             return PULSE_NEUTRAL_US, PULSE_NEUTRAL_US
 
         rc_fresh = time.time() - getattr(self, "_rc_last_seen", 0.0) < 1.5
@@ -479,10 +557,17 @@ class Vehicle:
         )
         self.link.mav.vfr_hud_send(self._speed_mps, self._speed_mps, int(heading), 0,
                                     self.state.alt_m, 0.0)
-        # No IMU data reaches the Pi yet (pi_link is Pi->Nucleo only) — only
-        # yaw, from GNSS heading, is real; roll/pitch are always 0.
-        self.link.mav.attitude_send(now_ms, 0.0, 0.0, math.radians(heading), 0.0, 0.0, 0.0)
-        self.link.mav.sys_status_send(0, 0, 0, 0, 65535, -1, -1, 0, 0, 0, 0, 0, 0)
+
+        roll = pitch = 0.0
+        if self.nucleo is not None and self.nucleo.telemetry.imu_valid:
+            roll = math.radians(self.nucleo.telemetry.roll_deg)
+            pitch = math.radians(self.nucleo.telemetry.pitch_deg)
+        # Yaw is always GNSS heading, never the IMU's own (no magnetometer
+        # fusion on the BNO086 side, see firmware/reflex/Core/Src/imu.c).
+        self.link.mav.attitude_send(now_ms, roll, pitch, math.radians(heading), 0.0, 0.0, 0.0)
+
+        voltage_mv, battery_pct = self._battery_status()
+        self.link.mav.sys_status_send(0, 0, 0, 0, voltage_mv, -1, battery_pct, 0, 0, 0, 0, 0, 0)
         self.link.mav.mission_current_send(self.navigator.mission_seq)
 
         home = (self.state.home_lat, self.state.home_lon) if self.state.home_lat is not None else None
@@ -540,6 +625,9 @@ class Vehicle:
             if now - self._last_telemetry >= telemetry_interval:
                 self._last_telemetry = now
                 self.send_telemetry()
+                if self.data_logger is not None:
+                    telemetry = self.nucleo.telemetry if self.nucleo is not None else None
+                    self.data_logger.log(self.state, telemetry)
 
             time.sleep(tick)
 
@@ -555,12 +643,17 @@ def main() -> int:
     parser.add_argument("--gnss-baud", type=int, default=115200)
     parser.add_argument("--echomap-port", help="echoMAP depth sounder")
     parser.add_argument("--echomap-baud", type=int, default=38400)
+    parser.add_argument("--log-dir", help="write timestamped NDJSON sensor logs here (optional)")
     args = parser.parse_args()
 
+    vehicle = Vehicle(args)
     try:
-        Vehicle(args).run()
+        vehicle.run()
     except KeyboardInterrupt:
         print("\n[vehicle] stopped")
+    finally:
+        if vehicle.data_logger is not None:
+            vehicle.data_logger.close()
     return 0
 
 

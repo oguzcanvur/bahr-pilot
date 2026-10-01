@@ -30,18 +30,25 @@
  *   [12..13]=steering_min [14..15]=steering_max [16..17]=steering_trim
  *   [18]=flags (bit0=throttle_reversed, bit1=steering_reversed)
  *   [19]=XOR checksum of bytes 0-18
- *   Not persisted to flash — resets to the defaults below on power-cycle.
+ *   Persisted to flash (settings.c) whenever a valid config frame is
+ *   accepted, and reloaded at boot — survives power-cycle. Falls back to
+ *   the compiled defaults below if flash is blank or fails its checksum.
  *   (Frame is 20 bytes total; comment above lists field offsets, not frame
  *   length rounding.)
  *
- * Nucleo -> Pi, RC telemetry, 36 bytes (new 2026-10-01 — makes the raw SBUS
- * channels and current failsafe status visible to BAHR-GCS's RC_CHANNELS
- * display / RadioPage, which previously only ever saw zeros):
+ * Nucleo -> Pi, RC telemetry, 42 bytes (36 bytes 2026-10-01, extended same
+ * day to carry battery/IMU — makes the raw SBUS channels, failsafe status,
+ * pack voltage and roll/pitch visible to the Pi, which previously only
+ * ever saw zeros/unknowns for all of this):
  *   [0]=0xE5 [1]=0x5E
  *   [2..33]=16 x channel value (uint16 each, raw 11-bit SBUS range)
  *   [34]=status (bit0=armed, bit1=rc_link_up, bit2=override_active,
- *                bit3=pi_link_fresh)
- *   [35]=XOR checksum of bytes 0-34
+ *                bit3=pi_link_fresh, bit4=battery_valid, bit5=imu_valid)
+ *   [35..36]=battery pack voltage, millivolts (uint16; 0/invalid if
+ *            bit4 clear — see battery.c's divider-ratio caveat)
+ *   [37..38]=roll, centidegrees, signed (int16; 0/invalid if bit5 clear)
+ *   [39..40]=pitch, centidegrees, signed (int16; 0/invalid if bit5 clear)
+ *   [41]=XOR checksum of bytes 0-40
  *   Sent every RC_LINK_TELEMETRY_PERIOD_MS from the main loop.
  */
 
@@ -80,8 +87,13 @@ bool PiLink_IsFresh(void);
 const RcMapConfig *PiLink_GetRcMap(void);
 
 /* Sends the RC telemetry frame (see header comment). Call once per
- * RC_LINK_TELEMETRY_PERIOD_MS from the main loop. */
-void PiLink_SendTelemetry(bool armed, bool rcLinkUp, bool overrideActive);
+ * RC_LINK_TELEMETRY_PERIOD_MS from the main loop. batteryValid/imuValid
+ * false means "don't trust batteryMv/rollCdeg/pitchCdeg", not "send zero
+ * as a real reading" — the Pi side treats the validity bits as
+ * authoritative. */
+void PiLink_SendTelemetry(bool armed, bool rcLinkUp, bool overrideActive,
+                           bool batteryValid, uint16_t batteryMv,
+                           bool imuValid, int16_t rollCdeg, int16_t pitchCdeg);
 
 void PiLink_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 void PiLink_UART_ErrorCallback(UART_HandleTypeDef *huart);

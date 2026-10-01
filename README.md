@@ -51,10 +51,13 @@ BAHR-GCS  <───────────────────────
 
 LED-blink on the Nucleo is the only piece actually verified on real
 hardware so far. Everything else — the MAVLink wire protocol, the Pi↔Nucleo
-packet protocol, the RC channel mixing — has been checked at the protocol
-level (a real BAHR-GCS instance talking to `bahr_pilot.vehicle` over UDP, and
-a `pyserial` loopback port exercising the real Nucleo-link code) but not yet
-against the real GNSS, depth sounder, Nucleo, or RC transmitter together.
+packet protocol, the RC channel mixing, the BNO086 IMU driver, the battery
+ADC reading, flash-persisted settings, the watchdog — has been checked at
+the protocol/compile/unit-test level (a real BAHR-GCS instance talking to
+`bahr_pilot.vehicle` over UDP, a `pytest` suite exercising the real
+`NucleoLink`/`RtcmReassembler`/`Vehicle` code — see `tests/` — and a clean
+firmware build) but not yet against the real GNSS, depth sounder, Nucleo,
+BNO086, RC transmitter, or battery together.
 See `CHANGELOG.md` for the detailed breakdown.
 
 ## Running it
@@ -68,10 +71,35 @@ python -m bahr_pilot.vehicle --gcs-host <PC running BAHR-GCS> \
 ```
 
 All three `--*-port` flags are optional — omit any sensor that isn't
-connected yet and that part just won't report data.
+connected yet and that part just won't report data. `--log-dir` is also
+optional and, if given, writes a timestamped NDJSON file of raw GNSS/
+depth/IMU/battery readings there (`datalog.py`) for later post-processing.
 
 Building and flashing the Nucleo firmware uses STM32CubeIDE (or its bundled
 `arm-none-eabi-gcc`/`make` from the command line) on `firmware/reflex/`.
+
+### Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite (`tests/`) runs entirely without hardware: it exercises the real
+`NucleoLink` class against a `pyserial` loopback port, the real
+`RtcmFragmenter`/`RtcmReassembler` round-trip, and `Vehicle`'s command/
+parameter handling directly. It does not and cannot verify the firmware
+side — that still needs a real Nucleo (the `arm-none-eabi-gcc` build
+itself is the only firmware-side check so far).
+
+### Deploying to the Pi
+
+`deploy/bahr-pilot.service` (systemd unit) and `deploy/update.sh`
+(`git pull` + dependency update + service restart) are templates for
+running this as a long-lived service on the Pi and updating it over SSH —
+copy the service file to `/etc/systemd/system/`, fill in the real
+`/dev/serial/by-id/...` paths, `enable` it, and `update.sh` handles
+updates after that. Neither has been tried against the real Pi yet.
 
 ## Related
 

@@ -1,0 +1,26 @@
+[Unit]
+Description=BAHR autopilot vehicle process (bahr_pilot.vehicle)
+After=network.target
+
+[Service]
+Type=simple
+User=bahr
+WorkingDirectory=/home/bahr/bahr-pilot
+# Every value below is a placeholder — none of this has been run on the
+# real Pi yet. Adjust --gcs-host to the PC running BAHR-GCS, and the
+# --*-port flags to the ACTUAL /dev/serial/by-id/... paths reported by
+# `ls -l /dev/serial/by-id/` on the real hardware (the ones below are
+# illustrative, not captured from a real device — see
+# bahr-own-autopilot-hardware's port-collision note on why by-id, not
+# /dev/ttyUSBn). All --*-port flags are optional.
+ExecStart=/home/bahr/bahr-pilot/.venv/bin/python -m bahr_pilot.vehicle \
+    --gcs-host 10.42.0.50 \
+    --nucleo-port /dev/serial0 \
+    --gnss-port /dev/serial/by-id/usb-REPLACE_WITH_REAL_RTD100_ID-port0 \
+    --echomap-port /dev/serial/by-id/usb-REPLACE_WITH_REAL_ECHOMAP_ID-port0 \
+    --log-dir /home/bahr/bahr-pilot-logs
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 #include "pi_link.h"
 #include "esc.h"
+#include "settings.h"
 #include <string.h>
 
 #define MOTOR_FRAME_LEN  7U
@@ -10,7 +11,7 @@
 #define CONFIG_SYNC0     0xC5U
 #define CONFIG_SYNC1     0x5CU
 
-#define TELEMETRY_FRAME_LEN 36U
+#define TELEMETRY_FRAME_LEN 42U
 #define TELEMETRY_SYNC0      0xE5U
 #define TELEMETRY_SYNC1      0x5EU
 
@@ -103,6 +104,7 @@ static void DecodeConfigFrame(const uint8_t *f)
         return;
     }
     s_rcMap = cfg;
+    Settings_SaveRcMap(&cfg); /* persists across power-cycle, see settings.c */
 }
 
 void PiLink_Init(void)
@@ -114,6 +116,12 @@ void PiLink_Init(void)
     s_lastRxTick = 0U;
     s_everReceived = false;
     s_txBusy = false;
+
+    RcMapConfig saved;
+    if (Settings_LoadRcMap(&saved)) {
+        s_rcMap = saved; /* overrides the compiled-in defaults above */
+    }
+
     HAL_UART_Receive_IT(&huart3, &s_rxByte, 1U);
 }
 
@@ -140,7 +148,9 @@ const RcMapConfig *PiLink_GetRcMap(void)
     return &s_rcMap;
 }
 
-void PiLink_SendTelemetry(bool armed, bool rcLinkUp, bool overrideActive)
+void PiLink_SendTelemetry(bool armed, bool rcLinkUp, bool overrideActive,
+                           bool batteryValid, uint16_t batteryMv,
+                           bool imuValid, int16_t rollCdeg, int16_t pitchCdeg)
 {
     if (s_txBusy) {
         return; /* previous frame still in flight; this is periodic, skip a beat */
@@ -158,8 +168,16 @@ void PiLink_SendTelemetry(bool armed, bool rcLinkUp, bool overrideActive)
     status |= rcLinkUp ? 0x02U : 0U;
     status |= overrideActive ? 0x04U : 0U;
     status |= PiLink_IsFresh() ? 0x08U : 0U;
+    status |= batteryValid ? 0x10U : 0U;
+    status |= imuValid ? 0x20U : 0U;
     s_txBuf[34] = status;
-    s_txBuf[35] = Checksum(s_txBuf, TELEMETRY_FRAME_LEN - 1U);
+    s_txBuf[35] = (uint8_t)(batteryMv >> 8);
+    s_txBuf[36] = (uint8_t)(batteryMv & 0xFFU);
+    s_txBuf[37] = (uint8_t)((uint16_t)rollCdeg >> 8);
+    s_txBuf[38] = (uint8_t)((uint16_t)rollCdeg & 0xFFU);
+    s_txBuf[39] = (uint8_t)((uint16_t)pitchCdeg >> 8);
+    s_txBuf[40] = (uint8_t)((uint16_t)pitchCdeg & 0xFFU);
+    s_txBuf[41] = Checksum(s_txBuf, TELEMETRY_FRAME_LEN - 1U);
 
     s_txBusy = true;
     if (HAL_UART_Transmit_IT(&huart3, s_txBuf, TELEMETRY_FRAME_LEN) != HAL_OK) {
