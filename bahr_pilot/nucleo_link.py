@@ -1,11 +1,11 @@
-"""Python side of bahr_pilot/firmware/reflex/Core/Src/pi_link.c's packet protocol —
+"""Python side of firmware/reflex/Core/Src/pi_link.c's packet protocol —
 now bidirectional (extended 2026-10-01 for configurable RC channel mapping,
 see pi_link.h for the authoritative frame layout both sides must agree on).
 
 Pi -> Nucleo, motor command, 7 bytes: [0xA5][0x5A][motor1_us hi/lo]
 [motor2_us hi/lo][XOR checksum]. Absolute microseconds, big-endian. The
 Nucleo treats a gap of more than 500 ms between frames as "Pi link down"
-(bahr_pilot/firmware/reflex/Core/Src/failsafe.c) — send periodically, not just on
+(firmware/reflex/Core/Src/failsafe.c) — send periodically, not just on
 change.
 
 Pi -> Nucleo, RC map config, 20 bytes: [0xC5][0x5C][throttle_ch][steering_ch]
@@ -22,7 +22,7 @@ Nucleo -> Pi, RC telemetry, 42 bytes (extended 2026-10-01 from the original
 status bit0=armed, bit1=rc_link_up, bit2=override_active,
 bit3=pi_link_fresh, bit4=battery_valid, bit5=imu_valid. battery_mv/
 roll_cdeg/pitch_cdeg are only meaningful when their validity bit is set —
-see bahr_pilot/firmware/reflex/Core/Src/battery.c and imu.c for where
+see firmware/reflex/Core/Src/battery.c and imu.c for where
 these actually come from (and their own hardware-unverified caveats).
 """
 from __future__ import annotations

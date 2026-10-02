@@ -14,7 +14,6 @@ from bahr_pilot.modes import MODE_AUTO, MODE_GUIDED, MODE_RTL
 from bahr_pilot.nucleo_link import PULSE_MAX_US, PULSE_MIN_US, PULSE_NEUTRAL_US
 
 EARTH_R = 6371000.0
-WP_RADIUS_M = 3.0
 
 # Steering tuning — not yet verified against the real boat's turning
 # behaviour or which motor ends up physically left/right.
@@ -81,7 +80,7 @@ class Navigator:
                 return self.mission[self.mission_seq]
         return None
 
-    def step(self, state, cruise_frac: float) -> tuple[int, int, bool]:
+    def step(self, state, cruise_frac: float, wp_radius_m: float) -> tuple[int, int, bool]:
         """Returns (motor1_us, motor2_us, reached_current_target)."""
         if state.lat is None or state.lon is None:
             return PULSE_NEUTRAL_US, PULSE_NEUTRAL_US, False
@@ -92,7 +91,7 @@ class Navigator:
             return PULSE_NEUTRAL_US, PULSE_NEUTRAL_US, False
 
         remaining = distance_m(state.lat, state.lon, *target)
-        if remaining < WP_RADIUS_M:
+        if remaining < wp_radius_m:
             return PULSE_NEUTRAL_US, PULSE_NEUTRAL_US, True
 
         m1, m2 = steer_towards(state.lat, state.lon, state.heading_deg, *target, cruise_frac)

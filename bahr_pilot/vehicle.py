@@ -6,7 +6,7 @@ Where sim/fake_vehicle.py simulates sensors and motion to exercise the GCS,
 this reads the real GNSS/depth sensors (bahr_pilot.sensors), drives the real
 Nucleo over UART (bahr_pilot.nucleo_link), and forwards RTK corrections to
 the GNSS (bahr_pilot.rtcm_forward) instead. The Nucleo firmware itself lives
-alongside this package at bahr_pilot/firmware/reflex/ (an STM32CubeIDE
+alongside this package at firmware/reflex/ (an STM32CubeIDE
 project — see that folder's own notes for building/flashing it).
 
     python -m bahr_pilot.vehicle --gcs-host 10.42.0.50 \\
@@ -58,26 +58,30 @@ from bahr_pilot.state import VehicleState
 
 TICK_HZ = 20.0
 TELEMETRY_HZ = 5.0
-GCS_LINK_TIMEOUT_S = 3.0
 # How long the pack voltage must stay under threshold before the failsafe
 # trips — a brief sag under load (e.g. a hard turn) shouldn't stop the boat.
 BATT_FS_DEBOUNCE_S = 3.0
 
-# Mirrors bahr_pilot/firmware/reflex/Core/Inc/sbus.h's SBUS_CH_MIN/MID/MAX — the
+# Mirrors firmware/reflex/Core/Inc/sbus.h's SBUS_CH_MIN/MID/MAX — the
 # default RCn_MIN/MAX/TRIM below assume no calibration offset, until
 # BAHR-GCS's RadioPage overwrites them with real captured values.
 _SBUS_CH_MIN = 172.0
 _SBUS_CH_MID = 992.0
 _SBUS_CH_MAX = 1811.0
 
-# Real, vehicle-specific tunables — a small set, not ArduPilot's full
-# parameter list (BAHR-GCS doesn't have a custom parameter page for this
-# vehicle yet, see ROADMAP.md section 6; this is enough to not break the
-# parameter protocol if something requests it).
+# A small real parameter set. Names reuse ArduPilot Rover's own wherever
+# the meaning matches, because BAHR-GCS keys its UI on those names: it
+# requests WP_RADIUS on connect to size its turn arcs, and gcs/param_meta.py
+# already carries labels/ranges for every name below.
 DEFAULT_PARAMS: dict[str, float] = {
-    "CRUISE_FRAC": 0.6,       # 0..1, fraction of PULSE span commanded at full speed
-    "WP_RADIUS_M": 3.0,
-    "GCS_FS_TIMEOUT_S": GCS_LINK_TIMEOUT_S,
+    "WP_RADIUS": 3.0,         # m, waypoint acceptance radius
+    # Feed-forward speed model, same contract as ArduRover: CRUISE_THROTTLE
+    # percent of the forward pulse span is assumed to give CRUISE_SPEED m/s.
+    # Open loop until a real speed controller exists (ROADMAP: phase 12).
+    "CRUISE_SPEED": 1.5,      # m/s
+    "CRUISE_THROTTLE": 60.0,  # %
+    "FS_GCS_ENABLE": 1.0,     # stop the motors when the GCS link goes quiet
+    "FS_TIMEOUT": 3.0,        # s
     # Channel -> function mapping, 1-based channel numbers matching
     # ArduPilot Rover's own RCMAP_ROLL/RCMAP_THROTTLE convention (and
     # BAHR-GCS's existing parameter page, gcs/param_meta.py's "radio"
@@ -142,6 +146,9 @@ class Vehicle:
 
         self._motor_test: tuple[int, int, float] | None = None  # motor, pulse_us, end_t
 
+        # Set by DO_CHANGE_SPEED; None means "use CRUISE_SPEED".
+        self.target_speed_mps: float | None = None
+
         self._batt_low_since: float | None = None
         self._batt_fs_warned = False
 
@@ -184,6 +191,11 @@ class Vehicle:
     def set_mode(self, mode: int) -> None:
         if mode == self.state.mode:
             return
+        # Slot 0 is home, never a target. Entering AUTO from BAHR-GCS's mode
+        # buttons (not MISSION_START) would otherwise sit on seq 0 and do
+        # nothing; ArduRover starts from item 1 in that case too.
+        if mode == MODE_AUTO and self.navigator.mission_seq < 1:
+            self.navigator.mission_seq = 1
         self.state.mode = mode
         self.log(f"mode -> {MODE_NAMES.get(mode, mode)}")
 
@@ -266,8 +278,11 @@ class Vehicle:
             self._ack(command, accepted)
 
         elif command == m.MAV_CMD_DO_CHANGE_SPEED:
+            # param2 is a speed in m/s (BAHR-GCS sends param1=1 ground
+            # speed, e.g. 1.5) — not a percentage. -1/0 means "no change".
             if p2 > 0:
-                self.params["CRUISE_FRAC"] = max(0.05, min(1.0, p2 / 100.0))
+                self.target_speed_mps = float(p2)
+                self.log(f"target speed -> {self.target_speed_mps:.2f} m/s")
             self._ack(command, accepted)
 
         elif command == m.MAV_CMD_DO_SET_HOME:
@@ -302,8 +317,10 @@ class Vehicle:
             self._ack(command, accepted)
 
         elif command == m.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN:
-            self._statustext("Reboot requested (not implemented)")
-            self._ack(command, accepted)
+            # Not implemented — answering ACCEPTED (as an earlier version did)
+            # made BAHR-GCS report a reboot that never happened.
+            self._statustext("Reboot not supported yet", 4)
+            self._ack(command, m.MAV_RESULT_UNSUPPORTED)
 
         else:
             self._ack(command, m.MAV_RESULT_UNSUPPORTED)
@@ -485,7 +502,10 @@ class Vehicle:
                 return (pulse, PULSE_NEUTRAL_US) if motor == 1 else (PULSE_NEUTRAL_US, pulse)
             self._motor_test = None
 
-        gcs_stale = (time.time() - self.state.gcs_last_seen) > self.params["GCS_FS_TIMEOUT_S"]
+        gcs_stale = (
+            self.params["FS_GCS_ENABLE"] > 0.5
+            and (time.time() - self.state.gcs_last_seen) > self.params["FS_TIMEOUT"]
+        )
         if not self.state.armed or gcs_stale or self._battery_failsafe_active():
             return PULSE_NEUTRAL_US, PULSE_NEUTRAL_US
 
@@ -499,10 +519,22 @@ class Vehicle:
             return max(PULSE_MIN_US, min(PULSE_MAX_US, int(m1))), \
                 max(PULSE_MIN_US, min(PULSE_MAX_US, int(m2)))
 
-        m1, m2, reached = self.navigator.step(self.state, self.params["CRUISE_FRAC"])
+        m1, m2, reached = self.navigator.step(
+            self.state, self._cruise_fraction(), self.params["WP_RADIUS"]
+        )
         if reached:
             self._on_target_reached()
         return m1, m2
+
+    def _cruise_fraction(self) -> float:
+        """Forward throttle fraction (0..1) for the current target speed,
+        from the CRUISE_SPEED/CRUISE_THROTTLE feed-forward pair."""
+        cruise_speed = self.params["CRUISE_SPEED"]
+        if cruise_speed <= 0:
+            return 0.0
+        speed = self.target_speed_mps if self.target_speed_mps is not None else cruise_speed
+        fraction = (self.params["CRUISE_THROTTLE"] / 100.0) * (speed / cruise_speed)
+        return max(0.0, min(1.0, fraction))
 
     def _on_target_reached(self) -> None:
         if self.state.mode == MODE_AUTO:

@@ -34,18 +34,22 @@ BAHR-GCS  <───────────────────────
                                  SBUS (RC)   I2C (IMU)   PWM (ESCs)
 ```
 
-- **`bahr_pilot/`** (this package) — the Pi-side MAVLink process
+- **`bahr_pilot/`** (Python package) — the Pi-side MAVLink process
   (`vehicle.py`): telemetry, mode/arm/mission handling, navigation, and
   drivers for the GNSS, depth sounder, RTK correction relay, and the link to
   the Nucleo.
 - **`firmware/reflex/`** — the Nucleo's C firmware (STM32CubeIDE project):
-  reads the RC receiver (SBUS) and will read the IMU (BNO086, not yet
-  implemented), drives the ESCs (PWM), and runs a small, strict failsafe
-  state machine independent of the Pi.
+  reads the RC receiver (SBUS), the IMU (BNO086) and the battery voltage,
+  drives the ESCs (PWM), and runs a small, strict failsafe state machine
+  independent of the Pi, backed by a hardware watchdog.
 - **Nucleo ↔ Pi protocol** (`bahr_pilot/nucleo_link.py` ↔
   `firmware/reflex/Core/Src/pi_link.c`) — a small bidirectional packet
   protocol over UART: motor commands and RC-channel-mapping configuration
-  one way, raw RC channel telemetry the other.
+  one way, RC channels + battery + roll/pitch telemetry the other.
+- **`docs/`** — `BAHR_GCS_ARCHITECTURE.md` (what BAHR-GCS actually sends
+  and expects, read from its code) and `ARCHITECTURE_REVIEW.md` (gap
+  analysis against the target STM32/FreeRTOS + ROS 2 architecture, and the
+  phase plan).
 
 ## Status
 
@@ -61,6 +65,8 @@ BNO086, RC transmitter, or battery together.
 See `CHANGELOG.md` for the detailed breakdown.
 
 ## Running it
+
+From the repository root:
 
 ```bash
 pip install -r requirements.txt

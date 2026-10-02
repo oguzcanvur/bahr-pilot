@@ -21,8 +21,11 @@
  *   4. boot / no command ever        -> stop (the default state until
  *                                       either RC or a fresh Pi command
  *                                       proves otherwise)
- *   5. own firmware stuck            -> TODO: IWDG reset, not implemented
+ *   5. own firmware stuck            -> IWDG resets the MCU (wdg.c), which
+ *                                       reboots into item 4
  */
+
+#include <stdbool.h>
 
 /* Call once after ESC_Init(), SBUS_Init() and PiLink_Init(). */
 void Failsafe_Init(void);
@@ -32,5 +35,8 @@ void Failsafe_Init(void);
  * sends the Nucleo->Pi RC telemetry frame on its own slower schedule
  * (see RC_LINK_TELEMETRY_PERIOD_MS in pi_link.h). */
 void Failsafe_Update(void);
+
+/* Hardware arm switch state as of the last Failsafe_Update(). */
+bool Failsafe_IsArmed(void);
 
 #endif /* FAILSAFE_H */

@@ -18,6 +18,10 @@
 
 void Wdg_Init(void)
 {
+    /* Without this, halting at a breakpoint lets the IWDG expire and the
+     * MCU resets under the debugger. No effect when no debugger is attached. */
+    DBGMCU->APB1FZR1 |= DBGMCU_APB1FZR1_DBG_IWDG_STOP;
+
     IWDG->KR = IWDG_KEY_ENABLE;
     IWDG->KR = IWDG_KEY_WRITE_ACCESS;
     IWDG->PR = IWDG_PRESCALER_64_CODE;

@@ -156,6 +156,7 @@ int main(void)
     {
       s_lastControlTick = now;
       Failsafe_Update();
+      PiLink_Process(Failsafe_IsArmed());
     }
 
     if ((now - s_lastBatteryTick) >= 50U)

@@ -55,6 +55,14 @@ static RcMapConfig s_rcMap = {
     .steering_reversed = false,
 };
 
+/* Written by the UART ISR, consumed by PiLink_Process() in the main loop.
+ * s_rcMap itself is only ever written from the main loop, so the control
+ * loop never reads a half-updated mapping. */
+static RcMapConfig s_pendingMap;
+static volatile bool s_mapPending;
+static volatile uint32_t s_lastConfigTick;
+static bool s_saveDirty;
+
 static uint8_t s_txBuf[TELEMETRY_FRAME_LEN];
 static volatile bool s_txBusy;
 
@@ -103,8 +111,27 @@ static void DecodeConfigFrame(const uint8_t *f)
         cfg.arm_channel >= SBUS_NUM_CHANNELS || cfg.override_channel >= SBUS_NUM_CHANNELS) {
         return;
     }
-    s_rcMap = cfg;
-    Settings_SaveRcMap(&cfg); /* persists across power-cycle, see settings.c */
+    s_pendingMap = cfg;
+    s_lastConfigTick = HAL_GetTick();
+    s_mapPending = true;
+}
+
+void PiLink_Process(bool armed)
+{
+    if (s_mapPending) {
+        __disable_irq();
+        RcMapConfig cfg = s_pendingMap;
+        s_mapPending = false;
+        __enable_irq();
+        s_rcMap = cfg;
+        s_saveDirty = true;
+    }
+
+    if (s_saveDirty && !armed &&
+        (HAL_GetTick() - s_lastConfigTick) >= SETTINGS_SAVE_DEBOUNCE_MS) {
+        Settings_SaveRcMap(&s_rcMap);
+        s_saveDirty = false;
+    }
 }
 
 void PiLink_Init(void)
@@ -116,6 +143,9 @@ void PiLink_Init(void)
     s_lastRxTick = 0U;
     s_everReceived = false;
     s_txBusy = false;
+    s_mapPending = false;
+    s_saveDirty = false;
+    s_lastConfigTick = 0U;
 
     RcMapConfig saved;
     if (Settings_LoadRcMap(&saved)) {

@@ -30,9 +30,14 @@
  *   [12..13]=steering_min [14..15]=steering_max [16..17]=steering_trim
  *   [18]=flags (bit0=throttle_reversed, bit1=steering_reversed)
  *   [19]=XOR checksum of bytes 0-18
- *   Persisted to flash (settings.c) whenever a valid config frame is
- *   accepted, and reloaded at boot — survives power-cycle. Falls back to
- *   the compiled defaults below if flash is blank or fails its checksum.
+ *   The UART ISR only stashes a valid frame; PiLink_Process() (main loop)
+ *   applies it and persists it to flash (settings.c) once no new frame has
+ *   arrived for SETTINGS_SAVE_DEBOUNCE_MS and the arm switch is off — a
+ *   page erase stalls this single-bank part's instruction fetch for tens
+ *   of ms, so it never runs in an ISR or while armed, and a RadioPage
+ *   calibration (dozens of PARAM_SETs) costs one erase, not dozens.
+ *   Reloaded at boot; falls back to the compiled defaults below if flash
+ *   is blank or fails its checksum.
  *   (Frame is 20 bytes total; comment above lists field offsets, not frame
  *   length rounding.)
  *
@@ -54,6 +59,7 @@
 
 #define PI_LINK_TIMEOUT_MS 500U
 #define RC_LINK_TELEMETRY_PERIOD_MS 100U
+#define SETTINGS_SAVE_DEBOUNCE_MS 1000U
 
 typedef struct {
     uint8_t throttle_channel;
@@ -85,6 +91,12 @@ bool PiLink_IsFresh(void);
  * stored 0-based here) so the out-of-the-box behaviour matches what a
  * BAHR-GCS user already expects without touching any parameter. */
 const RcMapConfig *PiLink_GetRcMap(void);
+
+/* Main-loop half of the RC map config path (see the frame description
+ * above): applies a config frame the ISR received, and saves to flash when
+ * it is safe to. Call every control tick with the current arm switch
+ * state. */
+void PiLink_Process(bool armed);
 
 /* Sends the RC telemetry frame (see header comment). Call once per
  * RC_LINK_TELEMETRY_PERIOD_MS from the main loop. batteryValid/imuValid

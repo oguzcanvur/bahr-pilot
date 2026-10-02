@@ -15,6 +15,7 @@
 #define MIX_SPEED_SPAN_US 500.0f
 
 static uint32_t s_lastTelemetryTick;
+static bool s_armed;
 
 static float NormalizeChannel(uint16_t raw, uint16_t min, uint16_t max, uint16_t trim, bool reversed)
 {
@@ -53,7 +54,13 @@ static void DriveFromRc(const RcMapConfig *map)
 void Failsafe_Init(void)
 {
     s_lastTelemetryTick = 0U;
+    s_armed = false;
     ESC_Stop();
+}
+
+bool Failsafe_IsArmed(void)
+{
+    return s_armed;
 }
 
 void Failsafe_Update(void)
@@ -61,6 +68,7 @@ void Failsafe_Update(void)
     const RcMapConfig *map = PiLink_GetRcMap();
 
     bool armed = SBUS_GetChannel(map->arm_channel) > SWITCH_THRESHOLD;
+    s_armed = armed;
     bool rcLinkUp = SBUS_IsLinkUp();
     bool overrideOn = rcLinkUp && SBUS_GetChannel(map->override_channel) > SWITCH_THRESHOLD;
 

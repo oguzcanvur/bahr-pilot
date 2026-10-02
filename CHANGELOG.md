@@ -10,6 +10,39 @@ Biçim [Keep a Changelog](https://keepachangelog.com/) temel alınarak tutulur.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-02
+
+### Düzeltilen
+- **Klonlanan repo çalışmıyordu:** Python modülleri repo kökündeydi, bu
+  yüzden `python -m bahr_pilot.vehicle`, `pytest` ve systemd servisi
+  `ModuleNotFoundError` veriyordu. Modüller `bahr_pilot/` alt paketine
+  taşındı. Artık repo kökünden çalıştırılıyor.
+- `MAV_CMD_DO_CHANGE_SPEED` hızı yüzde sanıyordu (GCS'nin 1.5 m/s'si %5
+  gaza kırpılıyordu). Bu, hem görev yüklemede hem de GCS'nin her dönüşte
+  gönderdiği uyarlanabilir hız komutunda motoru neredeyse durduruyordu.
+  Artık m/s olarak yorumlanıyor.
+- BAHR-GCS bağlanınca `WP_RADIUS` istiyor ama araç `WP_RADIUS_M` diyordu;
+  navigator parametreyi hiç okumadan sabit 3.0 kullanıyordu. İkisi de düzeltildi.
+- Mod butonuyla AUTO'ya geçilince araç ev noktasında (seq 0) bekliyordu;
+  artık 1. noktadan başlıyor.
+- Uygulanmamış reboot komutu `ACCEPTED` dönüyordu; artık `UNSUPPORTED`.
+- Firmware: RC harita ayarı UART kesmesinin içinde flash'a yazılıyordu.
+  Artık ana döngüde, yalnızca disarm iken ve ardışık yazımlar 1 sn içinde
+  birleştirilerek yazılıyor.
+- Firmware: debugger breakpoint'inde watchdog MCU'yu resetliyordu.
+
+### Değişen
+- Parametre adları BAHR-GCS'nin Türkçe parametre sözlüğündeki ArduPilot
+  adlarına geçti: `CRUISE_FRAC` → `CRUISE_SPEED` + `CRUISE_THROTTLE`,
+  `WP_RADIUS_M` → `WP_RADIUS`, `GCS_FS_TIMEOUT_S` → `FS_TIMEOUT` +
+  `FS_GCS_ENABLE`.
+
+### Eklenen
+- `docs/BAHR_GCS_ARCHITECTURE.md`: BAHR-GCS'nin araca gönderdiği ve
+  beklediği her şey, koddan okunarak çıkarıldı.
+- `docs/ARCHITECTURE_REVIEW.md`: hedef mimariye (STM32/FreeRTOS + ROS 2)
+  göre boşluk analizi, uyumluluk matrisi ve karar listesi.
+
 ## [0.1.0] — 2026-10-01
 
 ### Eklenen
@@ -54,5 +87,6 @@ Biçim [Keep a Changelog](https://keepachangelog.com/) temel alınarak tutulur.
 - BNO086'nın tekneye montaj yönüne göre roll/pitch işareti/ekseni
   doğrulanmadı.
 
-[Unreleased]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/oguzcanvur/bahr-pilot/releases/tag/v0.1.0
