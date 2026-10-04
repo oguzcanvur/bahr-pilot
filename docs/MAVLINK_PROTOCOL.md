@@ -20,7 +20,7 @@ ve anladıkları `BAHR_GCS_ARCHITECTURE.md` §4–§5'te. Bu fazlarda eklenenler
 
 | Ne | Nasıl |
 |---|---|
-| Açılışta sürüm | `STATUSTEXT` `BAHR-Pilot 0.1.1 link4 msn1` (`bahr_pilot/versions.py`) |
+| Açılışta sürüm | `STATUSTEXT` `BAHR-Pilot 0.2.0 link4 msn1` (`bahr_pilot/versions.py`) |
 | Kumanda ile arm reddi | `STATUSTEXT` `PreArm: …` (gaz merkezde değil, arm anahtarı açık, IMU/batarya hazır değil) |
 | Kumanda ile arm/disarm | `STATUSTEXT` `Armed (RC switch)` / `Disarmed (RC)` |
 | Kumanda mod anahtarı | `MODE_CH` + `MODE1…MODE6`; MANUAL bandında GCS mod komutu `DENIED` |

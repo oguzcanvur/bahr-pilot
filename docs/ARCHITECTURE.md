@@ -142,7 +142,7 @@ Doğrulama sınıfları (her raporda ayrı belirtilir):
 
 | Ne | Nerede | Şu an |
 |---|---|---|
-| Otopilot sürümü (SemVer) | `bahr_pilot/__init__.py` `__version__` | 0.1.1 |
+| Otopilot sürümü (SemVer) | `bahr_pilot/__init__.py` `__version__` | 0.2.0 |
 | Pi↔STM protokol sürümü | `bahr_pilot/versions.py` `BAHR_LINK_VERSION` | Faz 3–9 çıktılarıyla artırılır |
 | Görev biçimi | `bahr_pilot/versions.py` `MISSION_FORMAT_VERSION` | 1 (düz `NAV_WAYPOINT` listesi, slot 0 = ev) |
 | MAVLink | v2, `common` + ArduPilot diyalekti | — |

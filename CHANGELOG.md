@@ -10,9 +10,16 @@ Biçim [Keep a Changelog](https://keepachangelog.com/) temel alınarak tutulur.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-04
+
 Hepsi yazılım, protokol, derleme ve simülasyon düzeyinde doğrulandı; gerçek donanımda
 (GNSS, ekolot, Nucleo, BNO086, ESC'ler, tekne) denenmedi. Tüm kazançlar, gürültüler, gecikmeler
 ve eşikler yer tutucu tekne ve tahmin değerlerdir. Faz başına ölçümler: `docs/PHASE_REPORTS.md`.
+
+**Uyumluluk:** Pi ↔ STM protokolü BAHR-LINK 4'e çıktı (RC config 25 bayt, telemetri 44 bayt, yeni IMU
+çerçevesi). Pi yazılımı ile Nucleo firmware'i **birlikte** güncellenmeli; v0.1.1 firmware'i ile
+çalışmaz. Yeni parametrelerin BAHR-GCS'de Türkçe açıklamalı ve aralık denetimli görünmesi için BAHR-GCS
+0.2.0 önerilir.
 
 ### Eklenen (Pi tarafı, `bahr_pilot/`)
 - **Jeodezi** (`geo.py`, Faz 10): tam WGS84, yerel teğet düzlem (`LocalFrame`, tam ters dönüşüm),
@@ -176,6 +183,7 @@ ve eşikler yer tutucu tekne ve tahmin değerlerdir. Faz başına ölçümler: `
 - BNO086'nın tekneye montaj yönüne göre roll/pitch işareti/ekseni
   doğrulanmadı.
 
-[Unreleased]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/oguzcanvur/bahr-pilot/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/oguzcanvur/bahr-pilot/releases/tag/v0.1.0

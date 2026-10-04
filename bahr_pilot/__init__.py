@@ -2,4 +2,4 @@
 Python package) paired with an STM32 Nucleo-G431RB ("reflex",
 firmware/reflex/) over UART. See README.md for the full picture."""
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
