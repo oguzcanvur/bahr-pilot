@@ -141,7 +141,7 @@ değerde kalır.
 
 ## 9. Parametre sistemi
 
-- `param_meta.py`: ArduPilot adlarıyla (artı `RCMAP_ARM`, `RCMAP_OVERRIDE`,
+- `param_meta.py`: ArduPilot adlarıyla (artı `RCMAP_ARM`,
   `BATT_FS_ENABLE` gibi bu araca özgü eklemelerle) gruplanmış sözlük:
   frame, outputs, radio, modes, navigation, tuning, battery, failsafe, sonar …
 - Araçta olmayan parametre satırları, tam liste indirildikten sonra gizlenir.

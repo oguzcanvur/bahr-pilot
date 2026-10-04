@@ -10,6 +10,95 @@ Biçim [Keep a Changelog](https://keepachangelog.com/) temel alınarak tutulur.
 
 ## [Unreleased]
 
+Hepsi yazılım, protokol, derleme ve simülasyon düzeyinde doğrulandı; gerçek donanımda
+(GNSS, ekolot, Nucleo, BNO086, ESC'ler, tekne) denenmedi. Tüm kazançlar, gürültüler, gecikmeler
+ve eşikler yer tutucu tekne ve tahmin değerlerdir. Faz başına ölçümler: `docs/PHASE_REPORTS.md`.
+
+### Eklenen (Pi tarafı, `bahr_pilot/`)
+- **Jeodezi** (`geo.py`, Faz 10): tam WGS84, yerel teğet düzlem (`LocalFrame`, tam ters dönüşüm),
+  kesin yön/mesafe/çapraz iz hatası. Eski küresel haversine kilometrede 1,3–2,6 m hata veriyordu.
+- **Durum kestirimi** (`estimator.py`, Faz 6): yön filtresi (yön + jiroskop sapması, 4σ kapısı,
+  geçerlilik kuralları), gecikme telafili konum filtresi, en çok 5 s ölü hesap, `Pose`
+  (konum, yön, hız, σ, roll/pitch). Navigasyon yalnızca `state.pose`'u kullanır, ham alanları değil.
+- **Hat izleme** (`pathfollow.py`, Faz 11): ArduRover'ın `NAVL1_PERIOD/DAMPING` parametreleriyle
+  ileri bakışlı pure pursuit; çapraz iz kazancı, varış kuralı.
+- **Yön ve hız kontrolü** (`control.py`, Faz 12): ArduRover yapısı ve adları (`ATC_STR_*`, `ATC_SPEED_*`,
+  `ATC_ACCEL_MAX`); ölçüm üzerinden türev, anti-windup, kötü dt işleme; yer tutucu teknelerin en
+  kötüsüne göre ayarlı.
+- **Failsafe** (`failsafe.py`, Faz 20): GCS kaybı, batarya düşük/kritik, konum kaybı, yön kaybı, çit ihlali;
+  eylemler REPORT/RTL/HOLD/TERMINATE; bekleme süreleri, histerezis, seviye tetiklemeli (neden sürerken
+  yeniden AUTO seçmek yine HOLD'a götürür).
+- **Coğrafi çit ve güvenli RTL** (`geofence.py`, Faz 21): ev çevresinde daire + yüklenen çokgen/daire
+  dahil/hariç bölgeler (MAVLink çit öğeleri), işaretli marj, öngörülü ihlal denetimi (duruş mesafesi),
+  çiti kesecek RTL reddedilir.
+- **Parametre doğrulama ve kalıcılık** (`params.py`, Faz 22): her parametre için aralık/tamsayı/küme
+  tablosu, reddedilen değerin eski değerle yankılanması, atomik JSON kalıcılığı (`--param-file`),
+  bozuk dosya `.corrupt` olarak kenara alınır, `MAV_CMD_PREFLIGHT_STORAGE` (yükle/kaydet/sıfırla),
+  SIGTERM'de son kayıt.
+- **Ekolot süzgeci** (`sonar.py`, Faz 17): menzil, tepe/basamak ayrımı (Theil-Sen eğilim + hızlı
+  öngörücü), gürültü kalitesi, ısınma işareti. **Batimetri** (`bathymetry.py`, Faz 18–19): kat edilen
+  mesafeye göre örnekleme, yankı konumunun yaş + gecikme kadar geri alınması, VALID / LOW_QUALITY /
+  INVALID sınıflaması (nedenleriyle).
+- **Görev günlüğü** (`missionlog.py`, Faz 25): `--log-dir` ile her silahlanma için
+  `missions/mission-<zaman>/` (`meta.json`, `bathymetry.csv`, `track.csv`, `events.csv`, `summary.json`);
+  yazma hatası kaydı durdurur ama döngüyü asla düşürmez.
+- **Sağlık tablosu** (`diagnostics.py`, Faz 24): 11 parça için OK/UYARI/HATA, debounce, açılış süresi,
+  parça başına hız sınırı; her seviye değişimi `STATUSTEXT` + olay günlüğü; `SYS_STATUS`
+  `present/enabled/health` bitleri ve ana döngü yükü (`load`); açılıştaki tablo `meta.json`'da.
+- **Simülatör** (`bahr_pilot/sitl/`, Faz 26–27, `docs/SITL.md`): 3 serbestlik dereceli tekne, sensör
+  modeli ve 10'dan fazla arıza türü; gerçek `Vehicle` döngüsü içinde çalışır.
+- Dokümanlar: `docs/PHASE_REPORTS.md`, `docs/SITL.md`, `docs/SENSOR_INTERFACE.md`; `ARCHITECTURE.md` durum
+  sütunu; `MAVLINK_PROTOCOL.md` (parametreler, failsafe/çit mesajları, görev tipleri, derinlik, sağlık bitleri).
+
+### Eklenen (diğer)
+- **Kumandada ArduPilot tarzı mod anahtarı** (`MODE_CH` + `MODE1…MODE6`,
+  BAHR-GCS'nin zaten tanıdığı parametreler). Anahtarın kanalı 6 PWM
+  aralığına bölünür; her aralığın modunu `MODEn` söyler. Varsayılan, 3
+  konumlu bir anahtar için: MANUAL / HOLD / AUTO.
+  - `MODEn = MANUAL` olan aralıkta **STM motorları kumandadan kendisi sürer**
+    (Pi/GCS olmadan, eskiden `RCMAP_OVERRIDE` ile aynı bağımsızlıkta).
+  - Diğer modları Pi uygular: anahtar başka aralığa geçince (ve açılışta bir
+    kez) o aralığın modu seçilir; aradan GCS de mod değiştirebilir.
+  - Anahtar MANUAL'dayken GCS başka moda geçemez; komut `DENIED` döner.
+  - Sinyal kaybında mod korunur, motorları STM zaten durdurur.
+- `firmware/reflex/Core/Src/mode_switch.c`: saf (HAL'siz) aralık mantığı.
+- `tests/test_c_firmware_logic.py`: gerçek firmware C kodunu (`mode_switch.c`
+  ve `pi_link.c`, HAL taklit edilerek) host derleyicisiyle derleyip gerçek
+  Python tarafıyla bayt bayt karşılaştırıyor (config 25 bayt, telemetri 43
+  bayt, motor çerçevesi, flash yazma debounce'u). Derleyici yoksa atlanır.
+
+### Düzeltilen
+- `LocalFrame.to_geodetic` `to_enu`'nun tam tersi değildi (artık tek bir kalıntı düzeltmesiyle tam).
+- Navigasyon küresel haversine kullanıyordu; darbe uzunlukları `int()` ile kırpılıyordu (`round()`).
+- Eve dönüş noktası yalnızca ilk çağrıda ayarlanıyordu.
+- Tahminci gecikme için belirsizliği şişiriyordu ve RTK doğruluğunu öldürüyordu (artık ölçüm ileri
+  taşınıyor, gecikmenin belirsizliği gürültüye ekleniyor).
+- Yön, jiroskop arızasında 180°'ye kadar yanlışken "geçerli" kalıyordu.
+- GCS yaşı duvar saatiyle ölçülüyordu; araç tek bir monotonik saat kullanıyor. **STM telemetri tazeliği de
+  aynı hatayı taşıyordu** (`time.time()` ile damgalı): Pi'de RTC yok, NTP/GNSS saat senkronu STM'yi bir an
+  ölü gösterebilirdi. Artık `time.monotonic()`.
+- `mission_type` yok sayılıyordu: çit yüklemek görevi ezebilirdi.
+- `FS_TIMEOUT=NaN` GCS failsafe'ini kapatabiliyordu (artık parametre doğrulaması reddeder).
+- Açılışta Pi'nin varsayılan RC haritası STM'nin flash'taki kalibrasyonunun üzerine yazılıyordu (artık
+  yalnızca Pi'de kaydedilmiş STM'ye ait değer varsa gönderilir).
+- `DISTANCE_SENSOR` her telemetri turunda (5 Hz) ham değeri tekrarlıyordu; BAHR-GCS her mesajda haritaya
+  nokta eklediğinden aynı sondaj 5 kopya çiziliyordu. Artık kabul edilen her sondaj için bir kez, süzülmüş.
+- Görev günlüğünde her görevin ilk batimetri örneği düşüyordu (adım sırası); özet mesafe durağan
+  konum titreşimini yol sayıyordu (102,0 m yerine 104,7 m).
+
+### Değişen
+- `SYS_STATUS` sensör bit alanları ve `load` artık gerçek (eskiden 0). BAHR-GCS bunları okumaz; QGC/Mission
+  Planner gösterir.
+- `NAV_CONTROLLER_OUTPUT` gerçek `nav_bearing` ve `xtrack_error` taşıyor.
+- Görev protokolü `mission_type`'a göre ayrıldı (0 görev, 1 çit, 2 toplanma → UNSUPPORTED). Tip 0
+  `MISSION_CLEAR_ALL` bilerek ONAYLANMAZ: BAHR-GCS her `MISSION_ACK`'ı yükleme döngüsünde sayıyor.
+- `RcTelemetry.last_update` artık monotonik saniye.
+- `RCMAP_OVERRIDE` kaldırıldı, yerini `MODE_CH` aldı. Pi↔STM protokolü
+  değişti: RC config çerçevesi 20 → 25 bayt, telemetri 42 → 43 bayt
+  (`mode_slot`). İki taraf birlikte güncellenmeli. Flash kayıt düzeni
+  değişti (24 → 32 bayt, yeni sihirli sayı); eski kayıtlar reddedilip
+  varsayılanlara dönülür.
+
 ## [0.1.1] — 2026-10-02
 
 ### Düzeltilen

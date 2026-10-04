@@ -55,6 +55,11 @@ yeniden doğrulandı):
   §5'teki tabloda "STM32" varsayan satırlar (Faz 3, 5, 6, 9–12'nin STM'ye
   ait kısımları).
 
+**Kumanda mod anahtarı (kullanıcı kararı, 2026-10-02):** ArduPilot'un
+`MODE_CH` + `MODE1…MODE6` düzeni. MANUAL aralığını STM kendisi yorumlar ve
+motorları kumandadan sürer; diğer aralıkları Pi uygular. STM'nin işi yalnızca
+"hangi aralık, ve MANUAL mı" bilgisini üretmek, mod tablosu Pi'de kalıyor.
+
 **Prompt'taki iki madde bu düzende zaten karşılanıyor:** Faz 7 (RC +
 manuel mod: kumanda STM'ye bağlı, Pi olmadan sürer) ve §13/§19'daki
 `/cmd_heading`, `/cmd_speed` (Pi'nin ürettiği istenen yön/hız). İkincisi

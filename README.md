@@ -35,9 +35,16 @@ BAHR-GCS  <───────────────────────
 ```
 
 - **`bahr_pilot/`** (Python package) — the Pi-side MAVLink process
-  (`vehicle.py`): telemetry, mode/arm/mission handling, navigation, and
-  drivers for the GNSS, depth sounder, RTK correction relay, and the link to
-  the Nucleo.
+  (`vehicle.py`): telemetry, mode/arm/mission handling, and drivers for the
+  GNSS, depth sounder, RTK correction relay, and the link to the Nucleo.
+  Around it: the state estimator (`estimator.py`), line following
+  (`pathfollow.py`) and heading/speed control (`control.py`), the failsafe
+  rules (`failsafe.py`) and geofence with safe RTL (`geofence.py`), validated
+  and persistent parameters (`params.py`), the sonar filter and
+  position-stamped, quality-classified bathymetry (`sonar.py`,
+  `bathymetry.py`), the per-mission data log (`missionlog.py`), and the health
+  table behind SYS_STATUS (`diagnostics.py`). `bahr_pilot/sitl/` is a boat and
+  sensor simulator the whole vehicle runs in (`docs/SITL.md`).
 - **`firmware/reflex/`** — the Nucleo's C firmware (STM32CubeIDE project):
   reads the RC receiver (SBUS), the IMU (BNO086) and the battery voltage,
   drives the ESCs (PWM), and runs a small, strict failsafe state machine
@@ -79,7 +86,11 @@ python -m bahr_pilot.vehicle --gcs-host <PC running BAHR-GCS> \
 All three `--*-port` flags are optional — omit any sensor that isn't
 connected yet and that part just won't report data. `--log-dir` is also
 optional and, if given, writes a timestamped NDJSON file of raw GNSS/
-depth/IMU/battery readings there (`datalog.py`) for later post-processing.
+depth/IMU/battery readings there (`datalog.py`) for later post-processing,
+and a folder `missions/mission-<time>/` for every arming (`meta.json`,
+`bathymetry.csv` with the quality of every sounding, `track.csv`,
+`events.csv`, `summary.json`; see `missionlog.py`). Tuned parameters are kept
+in `--param-file` (default `~/.bahr_pilot/params.json`).
 
 Building and flashing the Nucleo firmware uses STM32CubeIDE (or its bundled
 `arm-none-eabi-gcc`/`make` from the command line) on `firmware/reflex/`.
@@ -94,9 +105,25 @@ pytest
 The suite (`tests/`) runs entirely without hardware: it exercises the real
 `NucleoLink` class against a `pyserial` loopback port, the real
 `RtcmFragmenter`/`RtcmReassembler` round-trip, and `Vehicle`'s command/
-parameter handling directly. It does not and cannot verify the firmware
-side — that still needs a real Nucleo (the `arm-none-eabi-gcc` build
-itself is the only firmware-side check so far).
+parameter/mode-switch handling directly.
+
+`tests/test_c_firmware_logic.py` additionally compiles real firmware C
+(`mode_switch.c`, `pi_link.c` with the HAL stubbed in `tests/c/stubs/`) with
+a host C compiler and checks it against the Python side byte for byte. It
+looks for `$BAHR_CC`, then `gcc`/`cc`/`clang`, then the `ziglang` pip
+package, and skips itself if none exists. Everything else in the firmware
+(sensors, ESC output, failsafe priorities, flash writes) is only checked by
+the `arm-none-eabi-gcc` build, until it runs on a real Nucleo.
+
+### RC mode switch
+
+One RC channel (`MODE_CH`, default 5) is split into six PWM bands exactly as
+in ArduPilot, and `MODE1…MODE6` name the mode of each band (defaults for a
+3-position switch: MANUAL / HOLD / AUTO). In a MANUAL band the Nucleo drives
+the motors from the sticks itself, with no Pi or GCS involved; the arm
+switch (`RCMAP_ARM`, default CH6) still has to be on. Other bands are applied
+by the Pi when the switch moves and once at startup; BAHR-GCS can change the
+mode in between, but not while the switch is in a MANUAL band.
 
 ### Deploying to the Pi
 
