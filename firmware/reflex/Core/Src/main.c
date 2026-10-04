@@ -29,6 +29,7 @@
 #include "imu.h"
 #include "settings.h"
 #include "wdg.h"
+#include "clock.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -117,6 +118,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
+  Clock_Init(); /* first: IMU_Init() and every sensor timestamp need it */
   Settings_Init();
   ESC_Init();
   SBUS_Init();
@@ -169,6 +171,11 @@ int main(void)
     {
       s_lastImuTick = now;
       IMU_Update();
+      ImuSample imuSample;
+      if (IMU_GetSample(&imuSample))
+      {
+        PiLink_SendImu(&imuSample);
+      }
     }
 
     if ((now - s_lastBlinkTick) >= 500U)

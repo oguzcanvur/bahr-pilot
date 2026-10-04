@@ -18,7 +18,13 @@ C_SRCS += \
 ../Core/Src/battery.c \
 ../Core/Src/imu.c \
 ../Core/Src/settings.c \
-../Core/Src/wdg.c
+../Core/Src/wdg.c \
+../Core/Src/mode_switch.c \
+../Core/Src/arming.c \
+../Core/Src/motor.c \
+../Core/Src/clock.c \
+../Core/Src/clock_core.c \
+../Core/Src/imu_reports.c
 
 OBJS += \
 ./Core/Src/main.o \
@@ -34,7 +40,13 @@ OBJS += \
 ./Core/Src/battery.o \
 ./Core/Src/imu.o \
 ./Core/Src/settings.o \
-./Core/Src/wdg.o
+./Core/Src/wdg.o \
+./Core/Src/mode_switch.o \
+./Core/Src/arming.o \
+./Core/Src/motor.o \
+./Core/Src/clock.o \
+./Core/Src/clock_core.o \
+./Core/Src/imu_reports.o
 
 C_DEPS += \
 ./Core/Src/main.d \
@@ -50,7 +62,13 @@ C_DEPS += \
 ./Core/Src/battery.d \
 ./Core/Src/imu.d \
 ./Core/Src/settings.d \
-./Core/Src/wdg.d
+./Core/Src/wdg.d \
+./Core/Src/mode_switch.d \
+./Core/Src/arming.d \
+./Core/Src/motor.d \
+./Core/Src/clock.d \
+./Core/Src/clock_core.d \
+./Core/Src/imu_reports.d
 
 
 # Each subdirectory must supply rules for building sources it contributes
