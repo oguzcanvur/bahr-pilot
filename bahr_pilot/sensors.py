@@ -1,36 +1,49 @@
 """echoMAP (NMEA depth/temp/GPS) + SweGeo RTD100 (Bynav ASCII, dual-antenna
-position/heading) readers.
+position/heading) readers, and the single place their data is merged.
 
-Ported from tools/echomap_bridge.py — same regexes, CRC and field indices,
-hardware-verified against the real units on 2026-09-15/16 (see that file's
-docstring and bahr-own-autopilot-hardware memory for the measurement notes
-behind the parsing choices). This module is the permanent home for that
-logic; tools/echomap_bridge.py remains as a standalone manual-test utility.
+The wire parsing (regexes, CRC32, framing) was ported from
+tools/echomap_bridge.py and hardware-verified against the real units on
+2026-09-15/16; the field-level parsing and the validity rules live in
+bahr_pilot/gnss.py (Phase 5). tools/echomap_bridge.py remains as a standalone
+manual-test utility.
+
+Merge rules (the reason GnssState exists as ONE shared object):
+  * Position: the RTD100's fix when it is usable and fresh, else the
+    echoMAP's own (single-antenna, metres-grade) GPS, else nothing. Never an
+    old value presented as current.
+  * Heading: ONLY the RTD100's dual-antenna heading, which is relative to true
+    north. The echoMAP's HCHDM is a magnetic heading; without a declination
+    correction it is several degrees off in Turkey, and mixing frames silently
+    is exactly what Phase 5 forbids. It is kept (magnetic_heading_deg) but not
+    published as the vehicle heading.
+  * Depth / water temperature expire too (5 s).
 """
 from __future__ import annotations
 
+import collections
+import dataclasses
+import math
 import re
 import threading
 import time
 
 import serial
 
+from bahr_pilot.gnss import (
+    DEPTH_TIMEOUT_S, Dops, GnssFix, GnssHeading, GnssQuality, fix_is_usable, heading_is_usable,
+    mav_fix_type, parse_bestposa, parse_gga, parse_gsa, parse_headinga,
+)
 from bahr_pilot.state import VehicleState
 
 _SENTENCE = re.compile(rb"\$([A-Z]{2}[A-Z]{3}),([^*\r\n]*)\*([0-9A-Fa-f]{2})")
 _BYNAV_LOG = re.compile(rb"#([A-Z0-9_]{3,24}),[^;$#*\r\n]*;([^$#*\r\n]*)\*([0-9A-Fa-f]{8})")
 
-# GGA fix quality -> MAVLink GPS_FIX_TYPE.
-_FIX_TYPE = {0: 1, 1: 3, 2: 4, 4: 6, 5: 5, 6: 2}
+# The echoMAP reports each sounding twice (SDDPT and SDDBT): a reading this soon after the
+# previous one is the duplicate. (A sounder faster than ~3 Hz would lose readings here.)
+MIN_DEPTH_INTERVAL_S = 0.3
 
-# Bynav/NovAtel pos_type -> MAVLink GPS_FIX_TYPE. Not an exhaustive list —
-# only the values seen/expected from the RTD100.
-_BYNAV_FIX_TYPE = {
-    "NONE": 1, "INSUFFICIENT_OBS": 1,
-    "SINGLE": 3, "PSRDIFF": 4, "WAAS": 4, "SBAS": 4,
-    "L1_FLOAT": 5, "NARROW_FLOAT": 5, "WIDE_FLOAT": 5,
-    "L1_INT": 6, "NARROW_INT": 6, "WIDE_INT": 6,
-}
+# How long a DOP / GSA mode reading stays attached to a position.
+_DOP_TIMEOUT_S = 3.0
 
 
 def _crc32_novatel(data: bytes) -> int:
@@ -51,18 +64,6 @@ def _checksum_ok(body: bytes, checksum: bytes) -> bool:
     return value == int(checksum, 16)
 
 
-def _coord(raw: str, hemisphere: str, degree_width: int) -> float | None:
-    if not raw or not hemisphere:
-        return None
-    try:
-        degrees = int(raw[:degree_width])
-        minutes = float(raw[degree_width:])
-    except ValueError:
-        return None
-    value = degrees + minutes / 60.0
-    return -value if hemisphere in ("S", "W") else value
-
-
 def _float(raw: str) -> float | None:
     try:
         return float(raw)
@@ -71,141 +72,203 @@ def _float(raw: str) -> float | None:
 
 
 class GnssState:
-    """Merges echoMAP's own (weak, single-antenna) GPS with the RTD100's
-    dual-antenna position + heading when available — RTD100 wins whenever
-    it has a lock."""
+    """Latest measurements from the RTD100 and the echoMAP, each stamped with
+    its arrival time, and the rules for turning them into one position and
+    one heading. One instance is shared by both reader threads."""
 
-    def __init__(self) -> None:
-        self.lat: float | None = None
-        self.lon: float | None = None
-        self.alt_m = 0.0
-        self.fix_quality = 0
-        self.satellites = 0
-        self.heading_deg = 0.0
-        self.depth_m: float | None = None
-        self.water_temp_c: float | None = None
-
-        self.rtd100_lat: float | None = None
-        self.rtd100_lon: float | None = None
-        self.rtd100_pos_type = "NONE"
-        self.rtd100_satellites = 0
-        self.rtd100_heading_deg: float | None = None
-
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
         self._lock = threading.Lock()
 
-    def apply_echomap(self, kind: str, fields: list[str]) -> None:
+        self._rtd_fix: GnssFix | None = None
+        self._rtd_heading: GnssHeading | None = None
+        self._rtd_dops: tuple[float, Dops] | None = None   # (arrival time, dops)
+        self._rtd_hdop: tuple[float, float] | None = None  # from GGA: (arrival time, hdop)
+        self._echo_fix: GnssFix | None = None
+
+        self.magnetic_heading_deg: float | None = None  # echoMAP HCHDM; NOT a vehicle heading
+        self._depth: tuple[float, float] | None = None  # (arrival time, metres)
+        # EVERY depth reading, for the sonar filter and the survey log: self._depth only keeps
+        # the newest. The echoMAP sends SDDPT and SDDBT for the same sounding; anything arriving
+        # within MIN_DEPTH_INTERVAL_S of the previous reading is that duplicate, not a new sounding.
+        self._depth_queue: collections.deque[tuple[float, float]] = collections.deque(maxlen=64)
+        self._last_queued_t = -math.inf
+        self._water_temp: tuple[float, float] | None = None
+
+        self.source = ""  # which source the last publish() used ("" = none)
+
+    # -- input ---------------------------------------------------------------
+
+    def apply_rtd100(self, kind: str, fields: list[str], now: float | None = None) -> None:
+        """One log/sentence from the RTD100's port: #BESTPOSA, #HEADINGA, or
+        NMEA GGA/GSA (it emits both formats at once)."""
+        t = self._clock() if now is None else now
         with self._lock:
-            if kind == "GPGGA" and len(fields) >= 9:
-                self.lat = _coord(fields[1], fields[2], 2)
-                self.lon = _coord(fields[3], fields[4], 3)
-                self.fix_quality = int(fields[5]) if fields[5].isdigit() else 0
-                self.satellites = int(fields[6]) if fields[6].isdigit() else 0
-                self.alt_m = _float(fields[8]) or 0.0
+            if kind == "BESTPOSA":
+                self._rtd_fix = parse_bestposa(fields, t, "rtd100")
+            elif kind == "HEADINGA":
+                self._rtd_heading = parse_headinga(fields, t)
+            elif kind.endswith("GGA") and len(fields) >= 8:
+                hdop = _float(fields[7])
+                if hdop is not None:
+                    self._rtd_hdop = (t, hdop)
+            elif kind.endswith("GSA"):
+                dops = parse_gsa(fields)
+                if dops is not None:
+                    self._rtd_dops = (t, dops)
+
+    def apply_echomap(self, kind: str, fields: list[str], now: float | None = None) -> None:
+        t = self._clock() if now is None else now
+        with self._lock:
+            if kind == "GPGGA":
+                self._echo_fix = parse_gga(fields, t, "echomap")
             elif kind == "HCHDM" and fields and fields[0]:
                 heading = _float(fields[0])
                 if heading is not None:
-                    self.heading_deg = heading
+                    self.magnetic_heading_deg = heading
             elif kind == "SDDPT" and fields and fields[0]:
                 depth = _float(fields[0])
                 if depth is not None:
-                    self.depth_m = depth
+                    self._depth = (t, depth)
+                    self._queue_depth(t, depth)
             elif kind == "SDDBT" and len(fields) >= 3 and fields[2]:
                 depth = _float(fields[2])  # field 3: depth in metres
                 if depth is not None:
-                    self.depth_m = depth
+                    self._depth = (t, depth)
+                    self._queue_depth(t, depth)
             elif kind == "SDMTW" and fields and fields[0]:
                 temp = _float(fields[0])
                 if temp is not None:
-                    self.water_temp_c = temp
+                    self._water_temp = (t, temp)
 
-    def apply_rtd100(self, kind: str, fields: list[str]) -> None:
-        """Bynav ASCII log fields (after ';', comma-separated).
+    def _queue_depth(self, t: float, depth: float) -> None:
+        # called with self._lock held
+        if t - self._last_queued_t < MIN_DEPTH_INTERVAL_S:
+            return
+        self._last_queued_t = t
+        self._depth_queue.append((t, depth))
 
-        #BESTPOSA: sol_status,pos_type,lat,lon,height,... (NovAtel layout)
-        #HEADINGA: sol_status,pos_type,length,heading,pitch,...
-        """
+    def take_depth_readings(self) -> list[tuple[float, float]]:
+        """Every (arrival time, metres) since the last call, oldest first."""
         with self._lock:
-            if kind == "BESTPOSA" and len(fields) >= 4:
-                self.rtd100_pos_type = fields[1]
-                lat = _float(fields[2])
-                lon = _float(fields[3])
-                if fields[1] not in ("NONE", "INSUFFICIENT_OBS") and lat and lon:
-                    self.rtd100_lat = lat
-                    self.rtd100_lon = lon
-                else:
-                    self.rtd100_lat = self.rtd100_lon = None
-                if len(fields) >= 14:
-                    try:
-                        self.rtd100_satellites = int(float(fields[13]))
-                    except ValueError:
-                        pass
-            elif kind == "HEADINGA" and len(fields) >= 4:
-                if fields[1] not in ("NONE",):
-                    self.rtd100_heading_deg = _float(fields[3])
-                else:
-                    self.rtd100_heading_deg = None
+            readings = list(self._depth_queue)
+            self._depth_queue.clear()
+        return readings
 
-    def publish(self, vehicle: VehicleState) -> None:
-        """Write the merged best-available values into the shared vehicle
-        state (RTD100 preferred over echoMAP's own weaker GPS)."""
+    # -- output --------------------------------------------------------------
+
+    def _best_fix_locked(self, now: float) -> GnssFix | None:
+        fix = self._rtd_fix
+        if fix_is_usable(fix, now):
+            if self._rtd_hdop is not None and now - self._rtd_hdop[0] <= _DOP_TIMEOUT_S:
+                fix = dataclasses.replace(fix, hdop=self._rtd_hdop[1])
+            if self._rtd_dops is not None and now - self._rtd_dops[0] <= _DOP_TIMEOUT_S:
+                dops = self._rtd_dops[1]
+                fix = dataclasses.replace(
+                    fix, hdop=dops.hdop if dops.hdop is not None else fix.hdop, vdop=dops.vdop)
+                if dops.mode == 2 and fix.quality == GnssQuality.FIX_3D:
+                    fix = dataclasses.replace(fix, quality=GnssQuality.FIX_2D)
+            return fix
+        if fix_is_usable(self._echo_fix, now):
+            return self._echo_fix
+        return None
+
+    def best_fix(self, now: float | None = None) -> GnssFix | None:
+        t = self._clock() if now is None else now
         with self._lock:
-            if self.rtd100_lat is not None:
-                lat, lon = self.rtd100_lat, self.rtd100_lon
-                satellites = self.rtd100_satellites
-                fix_type = _BYNAV_FIX_TYPE.get(self.rtd100_pos_type, 3)
-            else:
-                lat, lon = self.lat, self.lon
-                satellites = self.satellites
-                fix_type = _FIX_TYPE.get(self.fix_quality, 3 if lat is not None else 1)
-            heading = (
-                self.rtd100_heading_deg if self.rtd100_heading_deg is not None
-                else self.heading_deg
-            )
-            depth_m = self.depth_m
-            water_temp_c = self.water_temp_c
-            alt_m = self.alt_m
+            return self._best_fix_locked(t)
+
+    def best_heading(self, now: float | None = None) -> GnssHeading | None:
+        t = self._clock() if now is None else now
+        with self._lock:
+            return self._rtd_heading if heading_is_usable(self._rtd_heading, t) else None
+
+    def publish(self, vehicle: VehicleState, now: float | None = None) -> None:
+        """Write the current snapshot into the shared vehicle state. Call it
+        both when data arrives and on a timer: staleness has to be applied
+        even when nothing arrives, which is when it matters most."""
+        t = self._clock() if now is None else now
+        with self._lock:
+            fix = self._best_fix_locked(t)
+            heading = self._rtd_heading if heading_is_usable(self._rtd_heading, t) else None
+            depth = self._depth[1] if self._depth and t - self._depth[0] <= DEPTH_TIMEOUT_S else None
+            water_temp = (self._water_temp[1]
+                          if self._water_temp and t - self._water_temp[0] <= DEPTH_TIMEOUT_S else None)
+            self.source = fix.source if fix is not None else ""
 
         with vehicle.lock:
-            vehicle.lat = lat
-            vehicle.lon = lon
-            vehicle.heading_deg = heading
-            vehicle.satellites = satellites
-            vehicle.fix_type = fix_type
-            vehicle.depth_m = depth_m
-            vehicle.water_temp_c = water_temp_c
-            vehicle.alt_m = alt_m
+            if fix is not None:
+                vehicle.lat, vehicle.lon, vehicle.alt_m = fix.lat, fix.lon, fix.alt_m
+                vehicle.satellites = fix.satellites
+                vehicle.fix_type = mav_fix_type(fix.quality)
+                vehicle.gnss_quality = int(fix.quality)
+                vehicle.gnss_source = fix.source
+                vehicle.fix_time = fix.t
+                vehicle.h_acc_m, vehicle.v_acc_m = fix.h_acc_m, fix.v_acc_m
+                vehicle.diff_age_s, vehicle.hdop = fix.diff_age_s, fix.hdop
+            else:
+                vehicle.lat = vehicle.lon = None
+                vehicle.satellites = 0
+                vehicle.fix_type = 1
+                vehicle.gnss_quality = int(GnssQuality.NO_FIX)
+                vehicle.gnss_source = ""
+                vehicle.h_acc_m = vehicle.v_acc_m = vehicle.diff_age_s = vehicle.hdop = None
+            if heading is not None:
+                vehicle.heading_deg = heading.heading_deg
+                vehicle.heading_valid = True
+                vehicle.heading_acc_deg = heading.acc_deg
+                vehicle.heading_time = heading.t
+            else:
+                # heading_deg keeps its last value for display only; consumers
+                # must look at heading_valid before steering by it
+                vehicle.heading_valid = False
+                vehicle.heading_acc_deg = None
+            vehicle.depth_m = depth
+            vehicle.water_temp_c = water_temp
+
+
+def _lines(port: serial.Serial):
+    buf = bytearray()
+    while True:
+        chunk = port.read(256)
+        if not chunk:
+            continue
+        buf += chunk
+        while b"\n" in buf:
+            line, _, buf[:] = buf.partition(b"\n")
+            yield line.strip()
 
 
 def read_sentences(port: serial.Serial):
-    buf = bytearray()
-    while True:
-        chunk = port.read(256)
-        if not chunk:
-            continue
-        buf += chunk
-        while b"\n" in buf:
-            line, _, buf[:] = buf.partition(b"\n")
-            m = _SENTENCE.match(line.strip())
-            if m and _checksum_ok(m.group(1) + b"," + m.group(2), m.group(3)):
-                yield m.group(1).decode(), m.group(2).decode().split(",")
+    for line in _lines(port):
+        m = _SENTENCE.match(line)
+        if m and _checksum_ok(m.group(1) + b"," + m.group(2), m.group(3)):
+            yield m.group(1).decode(), m.group(2).decode().split(",")
 
 
 def read_bynav_logs(port: serial.Serial):
-    buf = bytearray()
-    while True:
-        chunk = port.read(256)
-        if not chunk:
+    for line in _lines(port):
+        m = _BYNAV_LOG.match(line)
+        if not m:
             continue
-        buf += chunk
-        while b"\n" in buf:
-            line, _, buf[:] = buf.partition(b"\n")
-            line = line.strip()
-            m = _BYNAV_LOG.match(line)
-            if not m:
-                continue
-            body = line[1:m.end(2)]  # between '#' and '*': name+header+';'+data
+        body = line[1:m.end(2)]  # between '#' and '*': name+header+';'+data
+        if _crc32_novatel(body) == int(m.group(3), 16):
+            yield m.group(1).decode(), m.group(2).decode().split(",")
+
+
+def read_rtd100(port: serial.Serial):
+    """The RTD100 sends its own Bynav ASCII logs AND standard NMEA on the same
+    port; yield both, each checksum/CRC verified."""
+    for line in _lines(port):
+        m = _BYNAV_LOG.match(line)
+        if m:
+            body = line[1:m.end(2)]
             if _crc32_novatel(body) == int(m.group(3), 16):
                 yield m.group(1).decode(), m.group(2).decode().split(",")
+            continue
+        m = _SENTENCE.match(line)
+        if m and _checksum_ok(m.group(1) + b"," + m.group(2), m.group(3)):
+            yield m.group(1).decode(), m.group(2).decode().split(",")
 
 
 def run_echomap_reader(serial_port: str, baud: int, gnss: GnssState, vehicle: VehicleState) -> None:
@@ -224,7 +287,7 @@ def run_rtd100_reader(serial_port: str, baud: int, gnss: GnssState, vehicle: Veh
     while True:
         try:
             with serial.Serial(serial_port, baud, timeout=0.2) as port:
-                for kind, fields in read_bynav_logs(port):
+                for kind, fields in read_rtd100(port):
                     gnss.apply_rtd100(kind, fields)
                     gnss.publish(vehicle)
         except (serial.SerialException, OSError) as exc:
